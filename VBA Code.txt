@@ -1,0 +1,1205 @@
+Function Bhavcopy_Download(Folder_Path As String, dt As Variant) As Boolean
+
+    Dim url As String
+    Dim zipPath As String
+    Dim extractPath As String
+    Dim http As Object
+    Dim stream As Object
+    Dim cmd As String
+    Dim dates_array As Variant
+    Dim csv_path As String
+    Dim clean_data_path As String
+    
+    On Error GoTo ErrHandler
+
+    url = "https://archives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_" & dt & "_F_0000.csv.zip"
+    zipPath = Folder_Path & dt & ".zip"
+    extractPath = Folder_Path & "\Extracted"
+
+    If Dir(Folder_Path, vbDirectory) = "" Then
+        MkDir Folder_Path
+    End If
+        
+    If Dir(extractPath, vbDirectory) = "" Then
+        MkDir extractPath
+    End If
+
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.Open "GET", "https://www.nseindia.com", False
+    http.setRequestHeader "User-Agent", "Mozilla/5.0"
+    http.send
+
+    http.Open "GET", url, False
+    http.setRequestHeader "User-Agent", "Mozilla/5.0"
+    http.setRequestHeader "Referer", "https://www.nseindia.com"
+    http.send
+
+    If http.Status <> 200 Then
+        Bhavcopy_Download = False
+        Exit Function
+    End If
+
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 1
+    stream.Open
+    stream.Write http.responseBody
+    stream.SaveToFile zipPath, 2
+    stream.Close
+
+    cmd = "tar -xf """ & zipPath & """ -C """ & extractPath & """"
+    Shell cmd, vbHide
+        
+    csv_path = extractPath & "\BhavCopy_NSE_FO_0_0_0_" & dt & "_F_0000.csv"
+        
+    clean_data_path = Clean_Downloaded_csv(csv_path, extractPath)
+        
+    r = LoadCSVAppend(clean_data_path, CStr(dt))
+    
+    Bhavcopy_Download = True
+    Exit Function
+    
+ErrHandler:
+    Bhavcopy_Download = False
+
+End Function
+
+
+
+Sub Download_And_Unzip_Bhavcopy()
+
+    Dim url As String
+    Dim zipPath As String
+    Dim extractPath As String
+    Dim http As Object
+    Dim stream As Object
+    Dim cmd As String, userHeader As String, curr_date As String, dt As Variant
+    Dim dates_array As Variant
+    Dim csv_path As String
+    Dim clean_data_path As String
+    Dim download As Boolean
+    Dim Folder_Path As String
+    
+    
+    userHeader = ThisWorkbook.Sheets("Macro Control").Range("C8").Value
+    Folder_Path = ThisWorkbook.Sheets("Macro Control").Range("C12").Value
+    curr_date = Format(Date - 1, "yyyymmdd")
+
+    dates_array = Array(userHeader, curr_date)
+
+    For Each dt In dates_array
+
+        download = Bhavcopy_Download(Folder_Path, dt)
+        
+    Next dt
+    
+End Sub
+
+Private Sub WaitForFile(filePath As String, Optional timeoutSeconds As Long = 10)
+
+    Dim t As Double
+    t = Timer
+
+    Do While Dir(filePath) = ""
+        DoEvents
+        If Timer - t > timeoutSeconds Then
+            Err.Raise vbObjectError + 1000, , "File not found: " & filePath
+        End If
+    Loop
+
+End Sub
+
+Function Clean_Downloaded_csv(csv_path As String, extractPath As String) As String
+
+    Dim wb As Workbook, ws As Worksheet
+    Dim srcPath As String, outPath As String, clean_data As String
+    Dim keepCols As Variant
+    Dim colX As Long, i As Long, lastRow As Long, lastCol As Long
+
+    outPath = extractPath & "output.xlsx"
+    clean_data = extractPath & "clean.xlsx"
+    keepCols = Array("TradDt", "TckrSymb", "FinInstrmNm", "ClsPric", "UndrlygPric", "OpnIntrst")
+
+        
+    If (Dir(outPath) <> "") Then Kill outPath
+    If (Dir(clean_data) <> "") Then Kill clean_data
+    
+    WaitForFile csv_path, 5
+    Set wb = Workbooks.Open(csv_path)
+    wb.SaveAs Filename:=outPath, FileFormat:=xlOpenXMLWorkbook
+    wb.Close False
+    
+    Set wb = Workbooks.Open(outPath)
+    Set ws = wb.Sheets(1)
+
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).row
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+
+    For i = 1 To lastCol
+        If ws.Cells(1, i).Value = "OptnTp" Then
+            colX = i
+            Exit For
+        End If
+    Next i
+       
+    With ws
+        .Range(.Cells(1, 1), .Cells(lastRow, lastCol)) _
+            .AutoFilter Field:=colX, Criteria1:="<>"
+    
+        On Error Resume Next
+        .Range(.Cells(2, 1), .Cells(lastRow, lastCol)) _
+            .SpecialCells(xlCellTypeVisible).EntireRow.Delete
+        On Error GoTo 0
+    
+        .AutoFilterMode = False
+    End With
+
+
+    For i = lastCol To 1 Step -1
+        If IsError(Application.Match(ws.Cells(1, i).Value, keepCols, 0)) Then
+            ws.Columns(i).Delete
+        End If
+    Next i
+
+    wb.SaveAs Filename:=clean_data, FileFormat:=xlOpenXMLWorkbook
+
+    wb.Close False
+
+    Clean_Downloaded_csv = clean_data
+
+End Function
+
+
+Function LoadCSVAppend(File_name As String, date_string As String) As String
+
+    On Error GoTo ErrHandler
+    
+    Dim ws As Worksheet
+    Dim csvFile As String
+    Dim lastRow As Long
+    Dim startRow As Long
+    Dim importRange As Range
+    Dim wbSrc As Workbook
+    
+
+    csvFile = File_name
+    
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Sheets("Data")
+    On Error GoTo 0
+    
+
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Sheets.Add
+        ws.name = "Data"
+    End If
+    
+
+    If Application.WorksheetFunction.CountA(ws.Cells) = 0 Then
+        lastRow = 1
+        startRow = 1
+    Else
+        lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).row + 1
+        startRow = 2
+    End If
+    
+
+    On Error GoTo ErrHandler
+    Set wbSrc = Workbooks.Open(csvFile)
+    Set src_sheet = wbSrc.Sheets(1)
+    
+    lastdestRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).row
+    found = False
+    
+    For i = 2 To lastdestRow
+        If IsDate(ws.Cells(i, 1).Value) Then
+            If Format(ws.Cells(i, 1).Value, "yyyymmdd") = date_string Then
+                found = True
+                Exit For
+            End If
+        End If
+    Next i
+    
+    If found Then
+        wbSrc.Close SaveChanges:=False
+    Else
+        lastSrcRow = src_sheet.Cells(src_sheet.Rows.Count, 1).End(xlUp).row
+        lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).row + 1
+        
+        If lastdestRow = 1 Then
+            src_sheet.Rows("1:" & lastSrcRow).Copy ws.Cells(1, 1)
+        Else
+            src_sheet.Rows("2:" & lastSrcRow).Copy ws.Cells(lastRow, 1)
+        End If
+        wbSrc.Close SaveChanges:=False
+    End If
+
+
+CleanExit:
+    Application.CutCopyMode = False
+    Exit Function
+
+ErrHandler:
+    MsgBox "CSV Load Error: " & Err.Description, vbCritical
+    wbSrc.Close False
+    Resume CleanExit
+
+    LoadCSVAppend = userinput
+    
+End Function
+
+
+Sub Filter_Data_And_Insert_To_Sheet()
+
+    Dim srcWs As Worksheet, tgtWs As Worksheet
+    Dim lastRow As Long, lastCol As Long
+    Dim optCol As Long
+    Dim rng As Range, visRng As Range
+    Dim i As Long
+
+
+    Set srcWs = ThisWorkbook.Sheets("Data")
+
+
+    On Error Resume Next
+    Set tgtWs = ThisWorkbook.Sheets("Futures_Data")
+    On Error GoTo 0
+
+    If tgtWs Is Nothing Then
+        Set tgtWs = ThisWorkbook.Sheets.Add
+        tgtWs.name = "Futures_Data"
+    Else
+        tgtWs.Cells.Clear
+    End If
+
+
+    lastRow = srcWs.Cells(srcWs.Rows.Count, 1).End(xlUp).row
+    lastCol = srcWs.Cells(1, srcWs.Columns.Count).End(xlToLeft).Column
+
+    Set rng = srcWs.Range(srcWs.Cells(1, 1), srcWs.Cells(lastRow, lastCol))
+
+    For i = 1 To lastCol
+        If srcWs.Cells(1, i).Value = "OptnTp" Then
+            optCol = i
+            Exit For
+        End If
+    Next i
+
+    If optCol = 0 Then
+        MsgBox "OptnTp column not found", vbCritical
+        Exit Sub
+    End If
+
+    rng.AutoFilter Field:=optCol, Criteria1:="="
+
+    Set visRng = rng.SpecialCells(xlCellTypeVisible)
+
+    visRng.Copy Destination:=tgtWs.Range("A1")
+
+    srcWs.AutoFilterMode = False
+
+End Sub
+
+
+Function FindColumnByHeader(ws As Worksheet, headerName As String) As Long
+    Dim rng As Range
+    
+    Set rng = ws.Rows(1).Find( _
+                What:=headerName, _
+                LookIn:=xlValues, _
+                LookAt:=xlWhole, _
+                MatchCase:=False)
+    
+    If Not rng Is Nothing Then
+        FindColumnByHeader = rng.Column
+    Else
+        FindColumnByHeader = 0
+    End If
+End Function
+
+Function CopySpecificColumns(ws As Worksheet, dest_sheet_name As String, cols As Variant, Optional extract_date As Boolean, Optional _
+remove_duplicates As Boolean) As String
+
+    Dim source_sheet As Worksheet, dest_sheet As Worksheet
+    Dim i As Long, dest_col As Long
+    Dim last_row As Long
+    Dim newCol As Long
+    Dim dataArr As Variant, outArr() As Variant
+    
+    Set source_sheet = ws
+    
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.EnableEvents = False
+
+    On Error Resume Next
+    Set dest_sheet = ThisWorkbook.Sheets(dest_sheet_name)
+    On Error GoTo 0
+    
+    If dest_sheet Is Nothing Then
+        Set dest_sheet = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        dest_sheet.name = dest_sheet_name
+    Else
+        dest_sheet.Cells.Clear
+    End If
+
+    
+    last_row = source_sheet.Cells(source_sheet.Rows.Count, 1).End(xlUp).row
+    dest_col = 1
+    
+    For i = LBound(cols) To UBound(cols)
+        source_sheet.Range(source_sheet.Cells(1, cols(i)), source_sheet.Cells(last_row, cols(i))).Copy _
+            dest_sheet.Cells(1, dest_col)
+        dest_col = dest_col + 1
+    Next i
+    
+    If extract_date Then
+        newCol = dest_sheet.Cells(1, ws.Columns.Count).End(xlToLeft).Column + 1
+        last_row = dest_sheet.Cells(source_sheet.Rows.Count, 1).End(xlUp).row
+        dest_sheet.Cells(1, newCol).Value = "Extracted"
+        
+        Dim colFin As Long
+        colFin = dest_sheet.Rows(1).Find("FinInstrmNm", LookAt:=xlWhole).Column
+        
+        dataArr = dest_sheet.Range(dest_sheet.Cells(2, colFin), dest_sheet.Cells(last_row, colFin)).Value
+        ReDim outArr(1 To UBound(dataArr), 1 To 1)
+        
+        For i = 1 To UBound(dataArr)
+            If Len(dataArr(i, 1)) >= 8 Then
+                outArr(i, 1) = Left(Right(dataArr(i, 1), 8), 5)
+            Else
+                outArr(i, 1) = ""
+            End If
+        Next i
+    
+        dest_sheet.Cells(2, newCol).Resize(UBound(outArr), 1).Value = outArr
+    End If
+    
+    If remove_duplicates Then
+        
+        dest_sheet.UsedRange.RemoveDuplicates Columns:=Array(1, 2, 3), Header:=xlYes
+        
+    End If
+    
+    dest_sheet.UsedRange.Columns.AutoFit
+    
+    CopySpecificColumns = dest_sheet_name
+
+End Function
+
+Function date_pivot(ws As Worksheet, sheet_name As String, row As String, col As String, val As String, no_cols As Long) As PivotTable
+
+
+    Dim wsData As Worksheet
+    Dim last_row As Long
+    Dim src_Range As Range
+    Dim wsPivot As Worksheet
+    Dim pt As PivotTable
+    
+
+    Set wsData = ws
+    
+    last_row = wsData.Cells(wsData.Rows.Count, 1).End(xlUp).row
+    Set src_Range = wsData.Range("A1").Resize(last_row, no_cols)
+    
+    On Error Resume Next
+    Set wsPivot = ThisWorkbook.Sheets(sheet_name)
+    On Error GoTo 0
+    
+    If wsPivot Is Nothing Then
+        Set wsPivot = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsPivot.name = sheet_name
+    Else
+        wsPivot.Cells.Clear
+        wsPivot.AutoFilterMode = False
+    End If
+    
+    Set pc = ThisWorkbook.PivotCaches.Create( _
+                SourceType:=xlDatabase, _
+                SourceData:=src_Range)
+    
+    Set pt = pc.CreatePivotTable( _
+                TableDestination:=wsPivot.Range("A3"), _
+                TableName:="MyPivot")
+    
+    With pt
+        .PivotFields(row).Orientation = xlRowField
+        .PivotFields(col).Orientation = xlColumnField
+        
+        With .PivotFields(val)
+            .Orientation = xlDataField
+            .Function = xlSum
+            .NumberFormat = "0.00"
+        End With
+        
+        .ColumnGrand = False
+        .RowGrand = False
+        
+        .PivotFields(row).Caption = "Underlying"
+        .PivotFields(col).Caption = "Date"
+        .RowAxisLayout xlTabularRow
+        .NullString = "0"
+        .DataFields(1).Caption = "Asset / Period"
+        
+    End With
+    
+    Set date_pivot = pt
+    
+End Function
+
+Function FindColumn(ws As Worksheet, headerName As String) As Long
+    Dim c As Range
+    For Each c In ws.Rows(1).Cells
+        If Trim(c.Value) = Trim(headerName) Then
+            FindColumn = c.Column
+            Exit Function
+        End If
+    Next c
+    FindColumn = 0
+End Function
+
+Function PivotToNormalTable(pt As PivotTable, outputSheetName As String) As String
+
+
+    Dim wsOut As Worksheet
+    Dim srcRange As Range
+    
+    Set srcRange = pt.TableRange2
+    
+    On Error Resume Next
+    Set wsOut = Sheets(outputSheetName)
+    On Error GoTo 0
+    
+    If wsOut Is Nothing Then
+        Set wsOut = Sheets.Add
+        wsOut.name = outputSheetName
+    Else
+        wsOut.Cells.Clear
+    End If
+    
+    wsOut.Range("A1").Resize(srcRange.Rows.Count, srcRange.Columns.Count).Value = srcRange.Value
+    
+    wsOut.Rows(1).Delete Shift:=xlUp
+    
+    wsOut.UsedRange.Columns.AutoFit
+    wsOut.Rows(1).Font.Bold = True
+    
+    PivotToNormalTable = outputSheetName
+
+End Function
+
+Function SubtractUserColumn(sheet_name As String, diff_col_name As String)
+
+    Dim ws As Worksheet
+    Dim userHeader As String
+    Dim fixedHeader As String
+    Dim userCol As Long, fixedCol As Long, resultCol As Long
+    Dim lastRow As Long
+    Dim i As Long
+    Dim dt As Date
+    
+    Set ws = Sheets(sheet_name)
+    
+    fixedHeader = CStr(Date - 2)
+    
+    userHeader = ThisWorkbook.Sheets("Macro Control").Range("C8").Value
+    dt = DateSerial(Left(userHeader, 4), Mid(userHeader, 5, 2), Right(userHeader, 2))
+    userHeader = CStr(Format(dt, "yyyy-mm-dd"))
+    
+    If userHeader = "" Then Exit Function
+    
+    userCol = FindColumn(ws, userHeader)
+    fixedCol = FindColumn(ws, fixedHeader)
+    
+    If userCol = 0 Then
+        MsgBox "Column not found: " & userHeader, vbCritical
+        Exit Function
+    End If
+    
+    If fixedCol = 0 Then
+        MsgBox "Fixed column not found: " & fixedHeader, vbCritical
+        Exit Function
+    End If
+    
+    lastRow = ws.Cells(ws.Rows.Count, fixedCol).End(xlUp).row
+    
+    resultCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column + 1
+    ws.Cells(1, resultCol).Value = diff_col_name
+    
+    Dim denom As Double
+    Dim num As Double
+    
+    For i = 2 To lastRow
+        num = ws.Cells(i, fixedCol).Value - ws.Cells(i, userCol).Value
+        denom = ws.Cells(i, userCol).Value
+        If IsNumeric(ws.Cells(i, fixedCol)) And IsNumeric(ws.Cells(i, userCol)) And denom <> 0 Then
+            ws.Cells(i, resultCol).Value = num * 100 / denom
+        ElseIf num = 0 Then
+            ws.Cells(i, resultCol).Value = 0
+        Else
+            ws.Cells(i, resultCol).Value = 999999999
+        End If
+    Next i
+    
+    ws.Columns(resultCol).AutoFit
+
+End Function
+
+Function ApplyAllBordersToPivot(pt As PivotTable) As String
+
+    Dim rng As Range
+    Set rng = pt.TableRange2
+
+    With rng.Borders
+        .LineStyle = xlContinuous
+        .Weight = xlThin
+        .ColorIndex = xlAutomatic
+    End With
+
+End Function
+
+
+Sub GroupAndSum(sheet_name As String)
+
+    Dim ws As Worksheet, wsOut As Worksheet
+    Dim lastRow As Long, i As Long
+    Dim dict As Object
+    Dim key As String
+    Dim sumVal As Double
+    
+    Set ws = Sheets(sheet_name)
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).row
+    Set dict = CreateObject("Scripting.Dictionary")
+    
+    For i = 2 To lastRow
+        key = ws.Cells(i, "A").Value & "|" & ws.Cells(i, "B").Value
+        
+        If dict.Exists(key) Then
+            dict(key) = dict(key) + ws.Cells(i, "C").Value
+        Else
+            dict.Add key, ws.Cells(i, "C").Value
+        End If
+    Next i
+    
+    On Error Resume Next
+    Set wsOut = Sheets("OI Data")
+    If wsOut Is Nothing Then Set wsOut = Sheets.Add
+    wsOut.name = "OI Data"
+    On Error GoTo 0
+    
+    wsOut.Range("A1").Value = "TckrSymb"
+    wsOut.Range("B1").Value = "TradDt"
+    wsOut.Range("C1").Value = "OpnIntrst"
+    
+    Dim r As Long
+    r = 2
+    Dim k As Variant
+    For Each k In dict.Keys
+        wsOut.Cells(r, "A").Value = Split(k, "|")(0)
+        wsOut.Cells(r, "B").Value = Split(k, "|")(1)
+        wsOut.Cells(r, "C").Value = dict(k)
+        r = r + 1
+    Next k
+End Sub
+
+
+
+Sub KeepNearestExpiry(sheet_name As String)
+
+    Dim ws As Worksheet
+    Dim lastRow As Long, i As Long
+    Dim dict As Object
+    Dim key As String
+    Dim currDate As Date, storedDate As Date
+    Dim expText As String
+    Dim mon As Long, yr As Long
+    
+
+    Set ws = Sheets(sheet_name)
+    last_row = ws.Cells(ws.Rows.Count, "A").End(xlUp).row
+    Set dict = CreateObject("Scripting.Dictionary")
+    
+    For i = last_row To 2 Step -1
+        tradeMonth = CLng(Month(ws.Cells(i, "B").Value))
+        
+        expText = ws.Cells(i, "E").Value
+        parts = Split(expText, "-")
+        expiryMonth = Month(DateValue("1-" & parts(1)))
+        
+        If tradeMonth <> CLng(parts(1)) Then
+            ws.Rows(i).Delete
+        End If
+    Next i
+    
+End Sub
+
+
+Sub Create_Sheet_2_3_4()
+
+    Dim Futures As Long
+    Dim Close_Price_Fut As Long
+    Dim Close_Price_Underlying As Long
+    Dim Underlying As Long
+    Dim Open_Interest As Long
+    Dim Date_var As Date
+    
+    
+    Dim r1 As String
+    Dim r2 As String
+    Dim r3 As String
+    
+    Futures = FindColumnByHeader(Sheets("Data"), "FinInstrmNm")
+    Close_Price_Fut = FindColumnByHeader(Sheets("Data"), "ClsPric")
+    
+    Underlying = FindColumnByHeader(Sheets("Data"), "TckrSymb")
+    Close_Price_Underlying = FindColumnByHeader(Sheets("Data"), "UndrlygPric")
+    
+    Open_Interest = FindColumnByHeader(Sheets("Data"), "OpnIntrst")
+    
+    Date_var = FindColumnByHeader(Sheets("Data"), "TradDt")
+
+    r1 = CopySpecificColumns(Sheets("Data"), "s1", Array(Underlying, Date_var, Futures, Close_Price_Fut), True, False)
+    
+    Call KeepNearestExpiry("s1")
+    
+    r2 = CopySpecificColumns(Sheets("Data"), "s2", Array(Underlying, Date_var, Close_Price_Underlying), False, True)
+    
+    r3 = CopySpecificColumns(Sheets("Data"), "s3", Array(Underlying, Date_var, Open_Interest), False, False)
+    
+    Call GroupAndSum("s3")
+    
+End Sub
+
+Sub create_date_pivot()
+
+    Dim r1 As PivotTable
+    Dim r2 As PivotTable
+    Dim r3 As PivotTable
+
+    Set r1 = date_pivot(Sheets("s1"), "Current Contract Prices", "TckrSymb", "TradDt", "ClsPric", 4)
+    Set r2 = date_pivot(Sheets("s2"), "Underlying Prices", "TckrSymb", "TradDt", "UndrlygPric", 3)
+    Set r3 = date_pivot(Sheets("OI Data"), "All Futures OI", "TckrSymb", "TradDt", "OpnIntrst", 3)
+    
+    b1 = ApplyAllBordersToPivot(r1)
+    b2 = ApplyAllBordersToPivot(r2)
+    b3 = ApplyAllBordersToPivot(r3)
+    
+    q1 = PivotToNormalTable(r1, "Data_Dash_2_1")
+    q2 = PivotToNormalTable(r2, "Data_Dash_2_2")
+    q3 = PivotToNormalTable(r3, "Data_Dash_2_3")
+    
+    
+End Sub
+
+
+Sub get_diff()
+
+    Dim src As Worksheet
+    Dim dest As Worksheet
+    Dim lastRow As Long
+
+    
+    Call SubtractUserColumn("Data_Dash_2_1", "Price Change(%)")
+    
+    Call SubtractUserColumn("Data_Dash_2_3", "Open Interest Change(%)")
+    
+    Set src = Sheets("Data_Dash_2_1")
+    Set dest = Sheets("Data_Dash_2_3")
+    
+    col_name = "Price Change(%)"
+    
+    On Error Resume Next
+    colNum = src.Rows(1).Find(What:=col_name, LookIn:=xlValues, LookAt:=xlWhole).Column
+    destCol_num = dest.Rows(1).Find(What:="Open Interest Change(%)", LookIn:=xlValues, LookAt:=xlWhole).Column
+    On Error GoTo 0
+    
+    lastRow = src.Cells(src.Rows.Count, colNum).End(xlUp).row
+    
+    src.Range(src.Cells(1, colNum), src.Cells(lastRow, colNum)).Copy _
+        Destination:=dest.Cells(1, destCol_num + 1)
+
+    End Sub
+
+Sub ApplyTableBorder(ws As Worksheet, startCol As Long, Optional chart_2_bool As Boolean = False)
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, startCol).End(xlUp).row
+
+    If lastRow < 2 Then Exit Sub
+
+    Dim last_col As Long
+    last_col = startCol + 2
+    
+    If chart_2_bool Then
+        last_col = last_col + 1
+    End If
+    
+    With ws.Range(ws.Cells(1, startCol), ws.Cells(lastRow, last_col)).Borders
+        .LineStyle = xlContinuous
+        .Weight = xlThin
+        .Color = RGB(0, 0, 0)
+    End With
+    
+    ws.Range(ws.Cells(1, startCol), ws.Cells(lastRow, last_col)).EntireColumn.AutoFit
+
+End Sub
+
+Sub FormatTitle(ws As Worksheet, rngTitle As Range, titleText As String)
+
+    With rngTitle
+        .Merge
+        .Value = titleText
+        .Font.Bold = True
+    End With
+
+    With rngTitle.Resize(2)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .Interior.Color = RGB(220, 230, 241)
+    End With
+
+End Sub
+
+
+Sub Create_OI_Tables()
+
+    Dim src As Worksheet, out As Worksheet
+    Dim lastRow As Long, i As Long
+    Dim rLB As Long, rSB As Long, rSC As Long, rLU As Long
+    
+    price_change = FindColumnByHeader(Sheets("Data_Dash_2_3"), "Price Change(%)")
+    oi_change = FindColumnByHeader(Sheets("Data_Dash_2_3"), "Open Interest Change(%)")
+    Underlying = FindColumnByHeader(Sheets("Data_Dash_2_3"), "Underlying")
+    
+    r1 = CopySpecificColumns(Sheets("Data_Dash_2_3"), "Dashboard2", Array(Underlying, oi_change, price_change), False, False)
+
+    Set src = ThisWorkbook.Sheets("Dashboard2")
+    
+    On Error Resume Next
+    Set out = ThisWorkbook.Sheets("Builtup Chart")
+    On Error GoTo 0
+    
+    If out Is Nothing Then
+        Set out = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        out.name = "Builtup Chart"
+    End If
+
+    lastRow = src.Cells(src.Rows.Count, "A").End(xlUp).row
+
+    out.Cells.Clear
+    
+    FormatTitle out, out.Range("A1:C1"), "LONG BUILD-UP"
+    FormatTitle out, out.Range("E1:G1"), "SHORT BUILD-UP"
+    FormatTitle out, out.Range("I1:K1"), "SHORT COVERING"
+    FormatTitle out, out.Range("M1:O1"), "LONG UNWINDING"
+    
+    out.Range("A2:C2").Value = Array("Underlying", "Open Interest Change(%)", "Price Change(%)")
+    out.Columns("A:C").AutoFit
+    
+    out.Range("E2:G2").Value = Array("Underlying", "Open Interest Change(%)", "Price Change(%)")
+    out.Columns("E:G").AutoFit
+    
+    out.Range("I2:K2").Value = Array("Underlying", "Open Interest Change(%)", "Price Change(%)")
+    out.Columns("I:K").AutoFit
+    
+    out.Range("M2:O2").Value = Array("Underlying", "Open Interest Change(%)", "Price Change(%)")
+    out.Columns("M:O").AutoFit
+
+    rLB = 3: rSB = 3: rSC = 3: rLU = 3
+
+    For i = 3 To lastRow
+
+        If src.Cells(i, 2).Value > 0 And src.Cells(i, 3).Value > 0 Then
+            out.Cells(rLB, 1).Resize(1, 3).Value = src.Cells(i, 1).Resize(1, 3).Value
+            rLB = rLB + 1
+
+        ElseIf src.Cells(i, 2).Value > 0 And src.Cells(i, 3).Value < 0 Then
+            out.Cells(rSB, 5).Resize(1, 3).Value = src.Cells(i, 1).Resize(1, 3).Value
+            rSB = rSB + 1
+
+        ElseIf src.Cells(i, 2).Value < 0 And src.Cells(i, 3).Value > 0 Then
+            out.Cells(rSC, 9).Resize(1, 3).Value = src.Cells(i, 1).Resize(1, 3).Value
+            rSC = rSC + 1
+
+        ElseIf src.Cells(i, 2).Value < 0 And src.Cells(i, 3).Value < 0 Then
+            out.Cells(rLU, 13).Resize(1, 3).Value = src.Cells(i, 1).Resize(1, 3).Value
+            rLU = rLU + 1
+        End If
+
+    Next i
+    
+    ApplyTableBorder out, 1
+    ApplyTableBorder out, 5
+    ApplyTableBorder out, 9
+    ApplyTableBorder out, 13
+
+End Sub
+
+Sub SortByOI(ws As Worksheet, startCol As Long, name As String)
+
+    Dim lastRow As Long
+
+    lastRow = ws.Cells(ws.Rows.Count, startCol).End(xlUp).row
+
+    ' If no data rows exist
+    If lastRow <= 3 Then Exit Sub
+
+    If name = "LB" Or name = "SB" Then
+
+        With ws.Sort
+            .SortFields.Clear
+            .SortFields.Add _
+                key:=ws.Range(ws.Cells(3, startCol + 1), ws.Cells(lastRow, startCol + 1)), _
+                SortOn:=xlSortOnValues, _
+                Order:=xlDescending, _
+                DataOption:=xlSortNormal
+    
+            ' Sort only headers + data (exclude title row)
+            .SetRange ws.Range(ws.Cells(2, startCol), ws.Cells(lastRow, startCol + 2))
+            .Header = xlYes
+            .Apply
+        End With
+    
+    Else
+        With ws.Sort
+            .SortFields.Clear
+            .SortFields.Add _
+                key:=ws.Range(ws.Cells(3, startCol + 1), ws.Cells(lastRow, startCol + 1)), _
+                SortOn:=xlSortOnValues, _
+                Order:=xlAscending, _
+                DataOption:=xlSortNormal
+    
+            ' Sort only headers + data (exclude title row)
+            .SetRange ws.Range(ws.Cells(2, startCol), ws.Cells(lastRow, startCol + 2))
+            .Header = xlYes
+            .Apply
+        End With
+    End If
+
+End Sub
+
+Sub sorting_bu_charts()
+
+    Dim out As Worksheet
+    
+    Set out = Sheets("Builtup Chart")
+
+    Call SortByOI(out, 1, "LB")     'Long Build-up
+    Call SortByOI(out, 5, "SB")    'Short Build-up
+    Call SortByOI(out, 9, "SC")    'Short Covering
+    Call SortByOI(out, 13, "LU")    'Long Unwinding
+
+End Sub
+
+
+Sub CreateDropdown()
+
+    Dim ws As Worksheet
+    Dim data_sheet As Worksheet
+    Dim lastRow As Long
+
+    Set ws = ThisWorkbook.Sheets("Macro Control")
+    Set data_sheet = ThisWorkbook.Sheets("Dashboard2")
+    
+    lastRow = data_sheet.Cells(data_sheet.Rows.Count, "A").End(xlUp).row
+
+    With ws.Range("C16").Validation
+        .Delete
+        .Add Type:=xlValidateList, _
+             Formula1:="='" & data_sheet.name & "'!$A$2:$A$" & lastRow
+        .IgnoreBlank = True
+        .InCellDropdown = True
+    End With
+
+
+End Sub
+
+
+
+
+Function DownloadLast20TradingDays(startDate As Date, total_counts As Long) As Collection
+
+    Dim d As Date
+    Dim successCount As Long
+    Dim curr_date As String
+    Dim Folder_Path As String
+    Dim downloadedDates As Collection
+    Dim attempts As Long
+    Dim maxAttempts As Long
+
+    Set downloadedDates = New Collection
+    
+    d = startDate
+    successCount = 0
+    attempts = 0
+    maxAttempts = total_counts * 4
+    
+    If total_counts <= 0 Then Exit Function
+    If startDate <= DateSerial(2000, 1, 1) Then Exit Function
+    
+    Folder_Path = ThisWorkbook.Sheets("Macro Control").Range("C12").Value
+    
+    Do While successCount < total_counts And attempts < maxAttempts
+
+        d = d - 1
+        curr_date = Format(d, "yyyymmdd")
+
+        If Bhavcopy_Download(Folder_Path, curr_date) Then
+            successCount = successCount + 1
+            downloadedDates.Add curr_date
+            'Debug.Print "Downloaded:", Format(d, "yyyy-mm-dd")
+        Else
+            'Debug.Print "Skipped:", Format(d, "yyyy-mm-dd")
+        End If
+
+    Loop
+
+    Set DownloadLast20TradingDays = downloadedDates
+
+End Function
+
+Sub BuildChartData(selectedStock As String, downloadedDates As Collection, price_sheet As String, OI_or_underlying_sheet As String, _
+data_sheet_name As String, x_col As String, y_col As String, chart_2_bool As Boolean)
+
+    Dim wsPrice As Worksheet, wsOI As Worksheet, wsTemp As Worksheet
+    Dim lastPriceRow As Long, lastOIRow As Long
+    Dim priceDict As Object, oiDict_underlying As Object
+    Dim i As Long, r As Long, key As String
+    Dim dStr As String
+    Dim lastHeaderCol As Long
+    lastHeaderCol = 3
+
+    Set wsPrice = Sheets(price_sheet)
+    Set wsOI = Sheets(OI_or_underlying_sheet)
+
+    Set priceDict = CreateObject("Scripting.Dictionary")
+    Set oiDict_underlying = CreateObject("Scripting.Dictionary")
+
+    lastPriceRow = wsPrice.Cells(wsPrice.Rows.Count, 1).End(xlUp).row
+
+    For i = 2 To lastPriceRow
+        key = wsPrice.Cells(i, 1).Value & "|" & _
+              Format(wsPrice.Cells(i, 2).Value, "yyyymmdd")
+        priceDict(key) = wsPrice.Cells(i, 4).Value
+    Next i
+
+    lastOIRow = wsOI.Cells(wsOI.Rows.Count, 1).End(xlUp).row
+
+    For i = 2 To lastOIRow
+        key = wsOI.Cells(i, 1).Value & "|" & _
+              Format(wsOI.Cells(i, 2).Value, "yyyymmdd")
+        oiDict_underlying(key) = wsOI.Cells(i, 3).Value
+    Next i
+
+    Application.DisplayAlerts = False
+    On Error Resume Next
+    Sheets(data_sheet_name).Delete
+    On Error GoTo 0
+    Application.DisplayAlerts = True
+
+    Set wsTemp = Sheets.Add
+    wsTemp.name = data_sheet_name
+    wsTemp.Range("A1:C1").Value = Array("Date", x_col, y_col)
+    If chart_2_bool Then
+        wsTemp.Range("A1:D1").Value = Array("Date", x_col, y_col, "Basis_Points")
+        lastHeaderCol = 4
+    End If
+    
+    With wsTemp.Range(wsTemp.Cells(1, 1), wsTemp.Cells(1, lastHeaderCol))
+        .Interior.Color = RGB(220, 230, 241)
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+    End With
+
+    r = 2
+
+    For i = 1 To downloadedDates.Count
+        Debug.Print downloadedDates.Count
+        dStr = downloadedDates(i)
+        key = selectedStock & "|" & dStr
+        Debug.Print key
+
+        If priceDict.Exists(key) And oiDict_underlying.Exists(key) Then
+            wsTemp.Cells(r, 1).Value = DateSerial( _
+                Left(dStr, 4), Mid(dStr, 5, 2), Right(dStr, 2))
+            wsTemp.Cells(r, 2).Value = priceDict(key)
+            wsTemp.Cells(r, 3).Value = oiDict_underlying(key)
+            If chart_2_bool Then
+                wsTemp.Cells(r, 4).Value = (priceDict(key) - oiDict_underlying(key)) * 10000 / oiDict_underlying(key)
+            End If
+            r = r + 1
+        End If
+
+    Next i
+        
+    ApplyTableBorder Sheets(data_sheet_name), 1, chart_2_bool
+
+End Sub
+
+Sub Update_Stock_Chart()
+
+    Dim selected_stock As String
+    Dim look_back_period As Long
+    Dim download_dates As Collection
+
+    selected_stock = Sheets("Macro Control").Range("C16").Value
+    look_back_period = Sheets("Macro Control").Range("C20").Value
+
+    If selected_stock = "" Then
+        Exit Sub
+    End If
+
+    Set download_dates = DownloadLast20TradingDays(Date, CLng(look_back_period))
+
+    Call Create_Sheet_2_3_4
+    
+    Call BuildChartData(selected_stock, download_dates, "s1", "OI Data", "chart_1_Data", "Price", "Open Interest", False)
+    
+    Call BuildChartData(selected_stock, download_dates, "s1", "s2", "chart_2_Data", "Price", "Underlying_Price", True)
+    
+    Call CreatePrice_OI_ComboChart(selected_stock, "chart_1_Data", "Price", "Open Interest", "Date v.s. Price & Open Interest", False)
+    
+    Call CreatePrice_OI_ComboChart(selected_stock, "chart_2_Data", "Price", "Open Interest", "Spread in Basis Points", True)
+    
+    Call RearrangeSheets_UsingArray
+
+End Sub
+
+
+
+Sub CreatePrice_OI_ComboChart(selected_stock As String, data_sheet As String, x_title As String, y_title As String, chart_title As String, chart_2_bool As Boolean)
+
+    Dim ws As Worksheet
+    Dim chObj As ChartObject
+    Dim lastRow As Long
+
+    Set ws = Sheets(data_sheet)
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).row
+    If lastRow = 1 Then
+        Exit Sub
+    End If
+
+    For Each chObj In ws.ChartObjects
+        chObj.Delete
+    Next chObj
+
+    Set chObj = ws.ChartObjects.Add(Left:=50, Top:=20, Width:=500, Height:=300)
+    
+    With chObj
+        .Left = ws.Range("G3").Left
+        .Top = ws.Range("G3").Top
+    End With
+
+
+
+    If chart_2_bool Then
+        With chObj.Chart
+            .ChartType = xlColumnClustered
+            .SetSourceData ws.Range("A1:A" & lastRow & ",D1:D" & lastRow)
+        
+            With .SeriesCollection(1)
+                .name = "Basis Points"
+                .AxisGroup = xlPrimary
+            End With
+        
+            .HasTitle = True
+            .ChartTitle.Text = "Spread in Basis Points for " & selected_stock
+            
+            With .Axes(xlCategory)
+                .HasTitle = True
+                .AxisTitle.Text = "Date"
+                .TickLabels.Orientation = 45
+            End With
+        
+            With .Axes(xlValue)
+                .HasTitle = True
+                .AxisTitle.Text = "Basis Points"
+                .CrossesAt = 0
+            End With
+        
+        End With
+
+    Else
+        With chObj.Chart
+            .ChartType = xlColumnClustered
+    
+            .SetSourceData ws.Range("A1:C" & lastRow)
+    
+            With .SeriesCollection(1)
+                .ChartType = xlLine
+                .AxisGroup = xlPrimary
+                .Format.Line.ForeColor.RGB = RGB(0, 0, 255)
+            End With
+            
+            With .SeriesCollection(2)
+                .ChartType = xlColumnClustered
+                .AxisGroup = xlSecondary
+                .Format.Fill.ForeColor.RGB = RGB(255, 100, 0)
+            End With
+    
+            .HasTitle = True
+            .ChartTitle.Text = chart_title & " " & selected_stock
+    
+    
+            With .Axes(xlCategory)
+                .TickLabels.Orientation = 45
+            End With
+    
+            With .Axes(xlPrimary)
+                .HasTitle = True
+                .AxisTitle.Text = x_title
+            End With
+            
+            With .Axes(xlSecondary)
+                .HasTitle = True
+                .AxisTitle.Text = y_title
+            End With
+    
+        End With
+    End If
+
+End Sub
+
+Function SheetExists(sheetName As String) As Boolean
+    On Error Resume Next
+    SheetExists = Not Sheets(sheetName) Is Nothing
+    On Error GoTo 0
+End Function
+
+
+Sub RearrangeSheets_UsingArray()
+
+    Application.ScreenUpdating = False
+
+    Dim sheetOrder As Variant
+    Dim i As Long
+    
+    sheetOrder = Array( _
+        "Macro Control", "Current Contract Prices", "Underlying Prices", "All Futures OI", "chart_1_Data", "chart_2_Data", "Builtup Chart", "Data", _
+        "s1", "s2", "s3", "OI Data", "Data_Dash_2_1", "Data_Dash_2_2", "Data_Dash_2_3", "Dashboard2")
+
+    For i = LBound(sheetOrder) To UBound(sheetOrder)
+        If SheetExists(CStr(sheetOrder(i))) Then
+            Sheets(sheetOrder(i)).Move After:=Sheets(Sheets.Count)
+        End If
+    Next i
+
+    Application.ScreenUpdating = True
+
+End Sub
+
+
+
+Sub Function_Call()
+
+    Call Download_And_Unzip_Bhavcopy
+    Call Create_Sheet_2_3_4
+    Call create_date_pivot
+    Call get_diff
+    Call Create_OI_Tables
+    Call sorting_bu_charts
+    Call RearrangeSheets_UsingArray
+
+End Sub
+
